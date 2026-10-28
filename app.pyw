@@ -5,7 +5,6 @@ import sys
 import subprocess
 import os
 
-# Tkinter otomatik kontrolü (Linux için)
 try:
     import tkinter as tk
 except ImportError:
@@ -23,8 +22,14 @@ import urllib.request
 import urllib.error
 import threading
 
-# Dosya yolları (Derlenmiş .exe içinde veya normal çalışmada doğru konumlanma)
-BASE_DIR = os.path.dirname(os.path.abspath(__file__)) if not getattr(sys, 'frozen', False) else os.path.dirname(os.path.executable)
+# Cross-platform ve PyInstaller uyumlu kusursuz dizin tespiti
+if getattr(sys, 'frozen', False):
+    # PyInstaller ile derlenmiş exe/binary çalışıyorsa
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    # Normal Python betiği olarak çalışıyorsa
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 DATASET_FILE = os.path.join(BASE_DIR, "oui_dataset.json")
 NET_VENDORS_FILE = os.path.join(BASE_DIR, "network_vendors.json")
 
@@ -35,7 +40,7 @@ MAC_REGEX = re.compile(
 class StandaloneMacEnricher:
     def __init__(self, root):
         self.root = root
-        self.root.withdraw() # Arka planda tam gizli hayalet servis (Arayüz penceresi yok)
+        self.root.withdraw() # Arka planda tam gizli hayalet servis
         
         self.oui_dataset = {}
         self.network_keywords = ["cisco", "meraki", "fortinet", "aruba", "hewlett packard", "hpe", "juniper", "nokia", "palo alto", "ubiquiti", "mikrotik", "huawei", "tp-link", "tp link"]
@@ -79,7 +84,7 @@ class StandaloneMacEnricher:
             pass
 
     def create_desktop_shortcut_if_needed(self):
-        """Windows'ta ilk açılışta masaüstüne otomatik kısayol oluşturur (Harici modül gerektirmez)"""
+        """Windows'ta ilk açılışta masaüstüne otomatik kısayol oluşturur"""
         if sys.platform.startswith('win'):
             try:
                 desktop = os.path.join(os.path.expanduser("~"), "Desktop")
