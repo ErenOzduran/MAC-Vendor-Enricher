@@ -11,7 +11,7 @@ import urllib.request
 import urllib.error
 import tkinter as tk
 
-# 1. PyInstaller (_MEIPASS) ve Normal Çalışma İçin Kusursuz Yol Tespiti
+# PyInstaller (_MEIPASS) ve Normal Çalışma İçin Dizin Tespiti
 if getattr(sys, 'frozen', False):
     BUNDLE_DIR = getattr(sys, '_MEIPASS', os.path.dirname(sys.executable))
     EXEC_DIR = os.path.dirname(os.path.abspath(sys.executable))
@@ -22,11 +22,12 @@ else:
 BUNDLED_DATASET = os.path.join(BUNDLE_DIR, "oui_dataset.json")
 BUNDLED_VENDORS = os.path.join(BUNDLE_DIR, "network_vendors.json")
 
-# Masaüstünü kirletmemek için önbelleği kullanıcının ana dizininde gizli dosya olarak tut
+# API'den çekilen en doğru verilerin kaydedildiği dinamik önbellek
 USER_CACHE_FILE = os.path.join(os.path.expanduser("~"), ".mac_vendor_cache.json")
 
+# Tarayıcılardaki görünmez karakterlere takılmayan esnek MAC Regex'i
 MAC_REGEX = re.compile(
-    r'\b((?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}|(?:[0-9A-Fa-f]{4}\.){2}[0-9A-Fa-f]{4})\b(?!\s*\()'
+    r'(?<![0-9A-Fa-f])((?:[0-9A-Fa-f]{2}\s*[:-]\s*){5}[0-9A-Fa-f]{2}|(?:[0-9A-Fa-f]{4}\.){2}[0-9A-Fa-f]{4})(?![0-9A-Fa-f])(?!\s*\()'
 )
 
 class StandaloneMacEnricher:
@@ -34,11 +35,14 @@ class StandaloneMacEnricher:
         self.root = root
         self.root.withdraw()
         
-        self.oui_dataset = {}
+        self.api_cache = {}       # 1. Öncelik: API'den öğrenilen gerçek/güncel veriler
+        self.fallback_dataset = {} # 2. Öncelik: Sadece internet/API yoksa kullanılacak yedek liste
+        
         self.network_keywords = [
             "cisco", "meraki", "fortinet", "aruba", "hewlett packard", 
             "hpe", "juniper", "nokia", "palo alto", "ubiquiti", 
-            "mikrotik", "huawei", "tp-link", "tp link", "extreme networks", "brocade"
+            "mikrotik", "huawei", "tp-link", "tp link", "mercusys",
+            "keenetic", "zyxel", "d-link", "netgear", "extreme networks", "brocade", "ruijie"
         ]
         
         self.load_files()
@@ -47,11 +51,10 @@ class StandaloneMacEnricher:
         self.last_clipboard = ""
         self.active_popup = None
         
-        self.show_clean_popup("MAC Vendor Enricher Aktif", ["Arka planda pano dinleniyor..."])
-        self.root.after(400, self.clipboard_monitor)
+        self.show_clean_popup("MAC Vendor Enricher Aktif", ["API öncelikli pano dinleme başladı..."])
+        self.root.after(350, self.clipboard_monitor)
 
     def normalize_oui_dict(self, raw_dict):
-        """JSON içindeki anahtarlar 40:ED:00 veya 40-ed-00 formatında olsa bile 40ED00 formatına çevirir."""
         cleaned = {}
         if isinstance(raw_dict, dict):
             for k, v in raw_dict.items():
@@ -61,35 +64,36 @@ class StandaloneMacEnricher:
         return cleaned
 
     def load_files(self):
-        # 1. Gömülü Network Vendors dosyasını oku
+        # 1. Network anahtar kelimelerini yükle ve varsayılanlarla birleştir
         if os.path.exists(BUNDLED_VENDORS):
             try:
                 with open(BUNDLED_VENDORS, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    self.network_keywords = [kw.lower() for kw in data.get("network_keywords", self.network_keywords)]
+                    loaded_kws = [kw.lower() for kw in data.get("network_keywords", [])]
+                    self.network_keywords = list(set(self.network_keywords + loaded_kws))
             except Exception:
                 pass
 
-        # 2. Gömülü OUI Dataset dosyasını oku ve anahtarları normalize et
+        # 2. Gömülü veri setini SADECE yedek (fallback) olarak yükle
         if os.path.exists(BUNDLED_DATASET):
             try:
                 with open(BUNDLED_DATASET, "r", encoding="utf-8") as f:
-                    self.oui_dataset.update(self.normalize_oui_dict(json.load(f)))
+                    self.fallback_dataset = self.normalize_oui_dict(json.load(f))
             except Exception:
                 pass
 
-        # 3. Varsa sonradan öğrenilen gizli önbelleği üstüne ekle
+        # 3. API'den daha önce çekilmiş doğru önbelleği yükle
         if os.path.exists(USER_CACHE_FILE):
             try:
                 with open(USER_CACHE_FILE, "r", encoding="utf-8") as f:
-                    self.oui_dataset.update(self.normalize_oui_dict(json.load(f)))
+                    self.api_cache = self.normalize_oui_dict(json.load(f))
             except Exception:
                 pass
 
     def save_cache(self):
         try:
             with open(USER_CACHE_FILE, "w", encoding="utf-8") as f:
-                json.dump(self.oui_dataset, f, indent=2, ensure_ascii=False)
+                json.dump(self.api_cache, f, indent=2, ensure_ascii=False)
         except Exception:
             pass
 
@@ -144,45 +148,68 @@ class StandaloneMacEnricher:
 
     def clean_vendor_name(self, vendor_str):
         v = vendor_str.split(",")[0]
-        for suffix in ["Corporation", "Inc.", "Inc", "Technologies", "Co.", "Ltd.", "Ltd", "Limited"]:
-            v = re.sub(rf'\b{ re.escape(suffix) }\b', '', v, flags=re.IGNORECASE)
-        return re.sub(r'\s+', ' ', v).strip()
+        for suffix in ["Corporation", "Inc.", "Inc", "Technologies", "Technology", "Co.", "Ltd.", "Ltd", "Limited", "GmbH"]:
+            v = re.sub(rf'\b{re.escape(suffix)}\b\.?', '', v, flags=re.IGNORECASE)
+        return re.sub(r'\s+', ' ', v).strip(" .,-")
 
     def fetch_vendor(self, mac_str):
         clean_oui = re.sub(r'[^0-9A-Fa-f]', '', mac_str).upper()[:6]
-        if clean_oui in self.oui_dataset:
-            return self.oui_dataset[clean_oui]
+        
+        # 1. ADIM: Daha önce API'den doğrulayıp kaydettiğimiz önbellekte varsa oradan dön
+        if clean_oui in self.api_cache:
+            return self.api_cache[clean_oui]
 
-        # 1. API: macvendors.com
+        # 2. ADIM: Doğrudan Canlı API'den (maclookup.app) en güncel üreticiyi çek
         try:
-            url = f"https://api.macvendors.com/{clean_oui}"
+            url = f"https://api.maclookup.app/v2/macs/{clean_oui}"
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
             with urllib.request.urlopen(req, timeout=2.5) as resp:
-                vendor = resp.read().decode("utf-8").strip()
-                if vendor and "errors" not in vendor.lower():
-                    vendor_clean = self.clean_vendor_name(vendor)
-                    self.oui_dataset[clean_oui] = vendor_clean
-                    self.save_cache()
-                    return vendor_clean
-        except Exception:
-            pass
-
-        # 2. Yedek API: maclookup.app (Rate limit veya kesinti durumunda devreye girer)
-        try:
-            url2 = f"https://api.maclookup.app/v2/macs/{clean_oui}"
-            req2 = urllib.request.Request(url2, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req2, timeout=2.5) as resp2:
-                data = json.loads(resp2.read().decode("utf-8"))
+                data = json.loads(resp.read().decode("utf-8"))
                 company = data.get("company", "").strip()
                 if company:
                     vendor_clean = self.clean_vendor_name(company)
-                    self.oui_dataset[clean_oui] = vendor_clean
+                    self.api_cache[clean_oui] = vendor_clean
                     self.save_cache()
                     return vendor_clean
         except Exception:
             pass
+
+        # 3. ADIM: İkinci Canlı API (macvendors.com)
+        try:
+            url2 = f"https://api.macvendors.com/{clean_oui}"
+            req2 = urllib.request.Request(url2, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req2, timeout=2.5) as resp2:
+                vendor = resp2.read().decode("utf-8").strip()
+                if vendor and "errors" not in vendor.lower():
+                    vendor_clean = self.clean_vendor_name(vendor)
+                    self.api_cache[clean_oui] = vendor_clean
+                    self.save_cache()
+                    return vendor_clean
+        except Exception:
+            pass
+
+        # 4. ADIM: İnternet yoksa veya API'ler yanıt vermediyse gömülü veri setine bak
+        if clean_oui in self.fallback_dataset:
+            return self.fallback_dataset[clean_oui]
         
         return "Bilinmeyen Üretici"
+
+    def get_clipboard_text(self):
+        """Hem standart panoyu (Ctrl+C / Sağ Tık Kopyala) hem de tarayıcı UTF8 formatını okur."""
+        for clip_type in ("CLIPBOARD", "PRIMARY"):
+            try:
+                text = self.root.selection_get(selection=clip_type)
+                if text and text.strip():
+                    # Tarayıcılardan gelen görünmez HTML boşluklarını temizle
+                    clean_text = text.replace('\u200b', '').replace('\xa0', ' ')
+                    if clip_type == "CLIPBOARD":
+                        return clean_text
+            except Exception:
+                pass
+        try:
+            return self.root.clipboard_get().replace('\u200b', '').replace('\xa0', ' ')
+        except Exception:
+            return ""
 
     def show_clean_popup(self, title, items_list):
         if self.active_popup:
@@ -228,14 +255,15 @@ class StandaloneMacEnricher:
 
     def clipboard_monitor(self):
         try:
-            current_clip = self.root.clipboard_get()
-            if current_clip != self.last_clipboard and len(current_clip) < 100000:
+            current_clip = self.get_clipboard_text()
+            if current_clip and current_clip != self.last_clipboard and len(current_clip) < 100000:
                 matches = list(MAC_REGEX.finditer(current_clip))
                 if matches:
                     detected_summary = []
                     
                     def replacer(match):
-                        mac = match.group(1)
+                        raw_mac = match.group(1)
+                        mac = re.sub(r'\s+', '', raw_mac)
                         vendor = self.fetch_vendor(mac)
                         
                         is_net = any(kw in vendor.lower() for kw in self.network_keywords)
@@ -261,7 +289,7 @@ class StandaloneMacEnricher:
         except Exception:
             pass
 
-        self.root.after(400, self.clipboard_monitor)
+        self.root.after(350, self.clipboard_monitor)
 
 if __name__ == "__main__":
     root = tk.Tk()
