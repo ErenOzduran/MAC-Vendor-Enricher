@@ -13,9 +13,7 @@ import tkinter as tk
 
 # 1. PyInstaller (_MEIPASS) ve Normal Çalışma İçin Kusursuz Yol Tespiti
 if getattr(sys, 'frozen', False):
-    # Gömülü JSON dosyalarının çıkartıldığı geçici dizin
     BUNDLE_DIR = getattr(sys, '_MEIPASS', os.path.dirname(sys.executable))
-    # Çalışan binary/exe'nin bulunduğu gerçek dizin (önbellek kaydı için)
     EXEC_DIR = os.path.dirname(os.path.abspath(sys.executable))
 else:
     BUNDLE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -24,8 +22,8 @@ else:
 BUNDLED_DATASET = os.path.join(BUNDLE_DIR, "oui_dataset.json")
 BUNDLED_VENDORS = os.path.join(BUNDLE_DIR, "network_vendors.json")
 
-# Kullanıcının yeni öğrendiği MAC adreslerini kaydedeceği yerel önbellek
-USER_CACHE_FILE = os.path.join(EXEC_DIR, "oui_dataset_cache.json")
+# Masaüstünü kirletmemek için önbelleği kullanıcının ana dizininde gizli dosya olarak tut
+USER_CACHE_FILE = os.path.join(os.path.expanduser("~"), ".mac_vendor_cache.json")
 
 MAC_REGEX = re.compile(
     r'\b((?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}|(?:[0-9A-Fa-f]{4}\.){2}[0-9A-Fa-f]{4})\b(?!\s*\()'
@@ -34,13 +32,13 @@ MAC_REGEX = re.compile(
 class StandaloneMacEnricher:
     def __init__(self, root):
         self.root = root
-        self.root.withdraw()  # Arka planda gizli çalışır
+        self.root.withdraw()
         
         self.oui_dataset = {}
         self.network_keywords = [
             "cisco", "meraki", "fortinet", "aruba", "hewlett packard", 
             "hpe", "juniper", "nokia", "palo alto", "ubiquiti", 
-            "mikrotik", "huawei", "tp-link", "extreme networks", "brocade"
+            "mikrotik", "huawei", "tp-link", "tp link", "extreme networks", "brocade"
         ]
         
         self.load_files()
@@ -49,9 +47,18 @@ class StandaloneMacEnricher:
         self.last_clipboard = ""
         self.active_popup = None
         
-        # İlk çalıştırmada kullanıcıya servisin aktif olduğunu bildiren mini bildirim
         self.show_clean_popup("MAC Vendor Enricher Aktif", ["Arka planda pano dinleniyor..."])
         self.root.after(400, self.clipboard_monitor)
+
+    def normalize_oui_dict(self, raw_dict):
+        """JSON içindeki anahtarlar 40:ED:00 veya 40-ed-00 formatında olsa bile 40ED00 formatına çevirir."""
+        cleaned = {}
+        if isinstance(raw_dict, dict):
+            for k, v in raw_dict.items():
+                clean_k = re.sub(r'[^0-9A-Fa-f]', '', str(k)).upper()[:6]
+                if len(clean_k) == 6 and v and "Bilinmeyen" not in str(v):
+                    cleaned[clean_k] = str(v)
+        return cleaned
 
     def load_files(self):
         # 1. Gömülü Network Vendors dosyasını oku
@@ -63,19 +70,19 @@ class StandaloneMacEnricher:
             except Exception:
                 pass
 
-        # 2. Gömülü OUI Dataset dosyasını oku
+        # 2. Gömülü OUI Dataset dosyasını oku ve anahtarları normalize et
         if os.path.exists(BUNDLED_DATASET):
             try:
                 with open(BUNDLED_DATASET, "r", encoding="utf-8") as f:
-                    self.oui_dataset.update(json.load(f))
+                    self.oui_dataset.update(self.normalize_oui_dict(json.load(f)))
             except Exception:
                 pass
 
-        # 3. Varsa sonradan öğrenilen yerel önbelleği üstüne ekle
+        # 3. Varsa sonradan öğrenilen gizli önbelleği üstüne ekle
         if os.path.exists(USER_CACHE_FILE):
             try:
                 with open(USER_CACHE_FILE, "r", encoding="utf-8") as f:
-                    self.oui_dataset.update(json.load(f))
+                    self.oui_dataset.update(self.normalize_oui_dict(json.load(f)))
             except Exception:
                 pass
 
@@ -87,7 +94,6 @@ class StandaloneMacEnricher:
             pass
 
     def setup_desktop_Integration(self):
-        """Windows ve Linux'ta masaüstüne çift tıklanabilir gerçek kısayol oluşturur."""
         if not getattr(sys, 'frozen', False):
             return
 
@@ -97,7 +103,6 @@ class StandaloneMacEnricher:
 
         target_exec = os.path.abspath(sys.executable)
 
-        # Windows için .lnk kısayolu
         if sys.platform.startswith('win'):
             shortcut_path = os.path.join(desktop, "MAC Vendor Enricher.lnk")
             if not os.path.exists(shortcut_path):
@@ -113,7 +118,6 @@ class StandaloneMacEnricher:
                 except Exception:
                     pass
 
-        # Linux için LibreOffice sorununu çözen gerçek .desktop başlatıcısı
         elif sys.platform.startswith('linux'):
             desktop_file = os.path.join(desktop, "MAC-Vendor-Enricher.desktop")
             if not os.path.exists(desktop_file):
@@ -132,28 +136,49 @@ class StandaloneMacEnricher:
                     )
                     with open(desktop_file, "w", encoding="utf-8") as f:
                         f.write(content)
-                    # Dosyaya çalıştırma izni ver
                     st = os.stat(desktop_file)
                     os.chmod(desktop_file, st.st_mode | stat.S_IEXEC)
-                    # Ubuntu GNOME üzerinde "Allow Launching" (Güvenilir) olarak işaretle
                     subprocess.run(["gio", "set", desktop_file, "metadata::trusted", "true"], capture_output=True)
                 except Exception:
                     pass
+
+    def clean_vendor_name(self, vendor_str):
+        v = vendor_str.split(",")[0]
+        for suffix in ["Corporation", "Inc.", "Inc", "Technologies", "Co.", "Ltd.", "Ltd", "Limited"]:
+            v = re.sub(rf'\b{ re.escape(suffix) }\b', '', v, flags=re.IGNORECASE)
+        return re.sub(r'\s+', ' ', v).strip()
 
     def fetch_vendor(self, mac_str):
         clean_oui = re.sub(r'[^0-9A-Fa-f]', '', mac_str).upper()[:6]
         if clean_oui in self.oui_dataset:
             return self.oui_dataset[clean_oui]
 
+        # 1. API: macvendors.com
         try:
-            url = f"https://api.macvendors.com/{mac_str}"
+            url = f"https://api.macvendors.com/{clean_oui}"
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=3) as resp:
+            with urllib.request.urlopen(req, timeout=2.5) as resp:
                 vendor = resp.read().decode("utf-8").strip()
-                vendor_clean = vendor.split(",")[0].replace("Corporation", "").replace("Inc.", "").strip()
-                self.oui_dataset[clean_oui] = vendor_clean
-                self.save_cache()
-                return vendor_clean
+                if vendor and "errors" not in vendor.lower():
+                    vendor_clean = self.clean_vendor_name(vendor)
+                    self.oui_dataset[clean_oui] = vendor_clean
+                    self.save_cache()
+                    return vendor_clean
+        except Exception:
+            pass
+
+        # 2. Yedek API: maclookup.app (Rate limit veya kesinti durumunda devreye girer)
+        try:
+            url2 = f"https://api.maclookup.app/v2/macs/{clean_oui}"
+            req2 = urllib.request.Request(url2, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req2, timeout=2.5) as resp2:
+                data = json.loads(resp2.read().decode("utf-8"))
+                company = data.get("company", "").strip()
+                if company:
+                    vendor_clean = self.clean_vendor_name(company)
+                    self.oui_dataset[clean_oui] = vendor_clean
+                    self.save_cache()
+                    return vendor_clean
         except Exception:
             pass
         
@@ -176,7 +201,7 @@ class StandaloneMacEnricher:
         self.active_popup.configure(bg="#1e1e1e")
 
         screen_width = self.active_popup.winfo_screenwidth()
-        popup_width = 450
+        popup_width = 460
         popup_height = 65 + (len(items_list) * 24)
         self.active_popup.geometry(f"{popup_width}x{popup_height}+{screen_width - popup_width - 20}+35")
 
