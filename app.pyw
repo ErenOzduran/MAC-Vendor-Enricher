@@ -1,34 +1,31 @@
-#!/usr/init/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 import sys
-import subprocess
 import os
-
-try:
-    import tkinter as tk
-except ImportError:
-    try:
-        if sys.platform.startswith('linux'):
-            subprocess.check_call(["sudo", "apt-get", "update"])
-            subprocess.check_call(["sudo", "apt-get", "install", "-y", "python3-tk"])
-        import tkinter as tk
-    except Exception:
-        sys.exit(1)
-
+import subprocess
+import stat
 import re
 import json
 import urllib.request
 import urllib.error
+import tkinter as tk
 
-# Kesin ve hatasız dizin tespiti
+# 1. PyInstaller (_MEIPASS) ve Normal Çalışma İçin Kusursuz Yol Tespiti
 if getattr(sys, 'frozen', False):
-    BASE_DIR = os.path.dirname(sys.executable)
+    # Gömülü JSON dosyalarının çıkartıldığı geçici dizin
+    BUNDLE_DIR = getattr(sys, '_MEIPASS', os.path.dirname(sys.executable))
+    # Çalışan binary/exe'nin bulunduğu gerçek dizin (önbellek kaydı için)
+    EXEC_DIR = os.path.dirname(os.path.abspath(sys.executable))
 else:
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    BUNDLE_DIR = os.path.dirname(os.path.abspath(__file__))
+    EXEC_DIR = BUNDLE_DIR
 
-DATASET_FILE = os.path.join(BASE_DIR, "oui_dataset.json")
-NET_VENDORS_FILE = os.path.join(BASE_DIR, "network_vendors.json")
+BUNDLED_DATASET = os.path.join(BUNDLE_DIR, "oui_dataset.json")
+BUNDLED_VENDORS = os.path.join(BUNDLE_DIR, "network_vendors.json")
+
+# Kullanıcının yeni öğrendiği MAC adreslerini kaydedeceği yerel önbellek
+USER_CACHE_FILE = os.path.join(EXEC_DIR, "oui_dataset_cache.json")
 
 MAC_REGEX = re.compile(
     r'\b((?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}|(?:[0-9A-Fa-f]{4}\.){2}[0-9A-Fa-f]{4})\b(?!\s*\()'
@@ -37,64 +34,111 @@ MAC_REGEX = re.compile(
 class StandaloneMacEnricher:
     def __init__(self, root):
         self.root = root
-        self.root.withdraw()
+        self.root.withdraw()  # Arka planda gizli çalışır
         
         self.oui_dataset = {}
-        self.network_keywords = ["cisco", "meraki", "fortinet", "aruba", "hewlett packard", "hpe", "juniper", "nokia", "palo alto", "ubiquiti", "mikrotik", "huawei", "tp-link"]
+        self.network_keywords = [
+            "cisco", "meraki", "fortinet", "aruba", "hewlett packard", 
+            "hpe", "juniper", "nokia", "palo alto", "ubiquiti", 
+            "mikrotik", "huawei", "tp-link", "extreme networks", "brocade"
+        ]
         
         self.load_files()
-        self.create_desktop_shortcut_if_needed()
+        self.setup_desktop_Integration()
         
         self.last_clipboard = ""
         self.active_popup = None
+        
+        # İlk çalıştırmada kullanıcıya servisin aktif olduğunu bildiren mini bildirim
+        self.show_clean_popup("MAC Vendor Enricher Aktif", ["Arka planda pano dinleniyor..."])
         self.root.after(400, self.clipboard_monitor)
 
     def load_files(self):
-        if not os.path.exists(NET_VENDORS_FILE):
+        # 1. Gömülü Network Vendors dosyasını oku
+        if os.path.exists(BUNDLED_VENDORS):
             try:
-                with open(NET_VENDORS_FILE, "w", encoding="utf-8") as f:
-                    json.dump({"network_keywords": self.network_keywords}, f, indent=2, ensure_ascii=False)
-            except:
-                pass
-        else:
-            try:
-                with open(NET_VENDORS_FILE, "r", encoding="utf-8") as f:
+                with open(BUNDLED_VENDORS, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     self.network_keywords = [kw.lower() for kw in data.get("network_keywords", self.network_keywords)]
-            except:
+            except Exception:
                 pass
 
-        if os.path.exists(DATASET_FILE):
+        # 2. Gömülü OUI Dataset dosyasını oku
+        if os.path.exists(BUNDLED_DATASET):
             try:
-                with open(DATASET_FILE, "r", encoding="utf-8") as f:
-                    self.oui_dataset = json.load(f)
-            except:
-                self.oui_dataset = {}
+                with open(BUNDLED_DATASET, "r", encoding="utf-8") as f:
+                    self.oui_dataset.update(json.load(f))
+            except Exception:
+                pass
+
+        # 3. Varsa sonradan öğrenilen yerel önbelleği üstüne ekle
+        if os.path.exists(USER_CACHE_FILE):
+            try:
+                with open(USER_CACHE_FILE, "r", encoding="utf-8") as f:
+                    self.oui_dataset.update(json.load(f))
+            except Exception:
+                pass
 
     def save_cache(self):
         try:
-            with open(DATASET_FILE, "w", encoding="utf-8") as f:
+            with open(USER_CACHE_FILE, "w", encoding="utf-8") as f:
                 json.dump(self.oui_dataset, f, indent=2, ensure_ascii=False)
-        except:
+        except Exception:
             pass
 
-    def create_desktop_shortcut_if_needed(self):
+    def setup_desktop_Integration(self):
+        """Windows ve Linux'ta masaüstüne çift tıklanabilir gerçek kısayol oluşturur."""
+        if not getattr(sys, 'frozen', False):
+            return
+
+        desktop = os.path.join(os.path.expanduser("~"), "Desktop")
+        if not os.path.exists(desktop):
+            return
+
+        target_exec = os.path.abspath(sys.executable)
+
+        # Windows için .lnk kısayolu
         if sys.platform.startswith('win'):
-            try:
-                desktop = os.path.join(os.path.expanduser("~"), "Desktop")
-                shortcut_path = os.path.join(desktop, "MAC Vendor Enricher.lnk")
-                if not os.path.exists(shortcut_path):
-                    target = sys.executable if getattr(sys, 'frozen', False) else __file__
+            shortcut_path = os.path.join(desktop, "MAC Vendor Enricher.lnk")
+            if not os.path.exists(shortcut_path):
+                try:
                     ps_script = (
                         f"$WshShell = New-Object -comObject WScript.Shell; "
                         f"$Shortcut = $WshShell.CreateShortcut('{shortcut_path}'); "
-                        f"$Shortcut.TargetPath = '{target}'; "
-                        f"$Shortcut.WorkingDirectory = '{os.path.dirname(target)}'; "
+                        f"$Shortcut.TargetPath = '{target_exec}'; "
+                        f"$Shortcut.WorkingDirectory = '{EXEC_DIR}'; "
                         f"$Shortcut.Save()"
                     )
                     subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_script], capture_output=True)
-            except:
-                pass
+                except Exception:
+                    pass
+
+        # Linux için LibreOffice sorununu çözen gerçek .desktop başlatıcısı
+        elif sys.platform.startswith('linux'):
+            desktop_file = os.path.join(desktop, "MAC-Vendor-Enricher.desktop")
+            if not os.path.exists(desktop_file):
+                try:
+                    content = (
+                        "[Desktop Entry]\n"
+                        "Version=1.0\n"
+                        "Type=Application\n"
+                        "Name=MAC Vendor Enricher\n"
+                        "Comment=Arka Plan MAC Adresi Zenginlestirici\n"
+                        f"Exec=\"{target_exec}\"\n"
+                        f"Path={EXEC_DIR}\n"
+                        "Terminal=false\n"
+                        "StartupNotify=false\n"
+                        "Categories=Utility;Network;\n"
+                    )
+                    with open(desktop_file, "w", encoding="utf-8") as f:
+                        f.write(content)
+                    # Dosyaya çalıştırma izni ver
+                    st = os.stat(desktop_file)
+                    os.chmod(desktop_file, st.st_mode | stat.S_IEXEC)
+                    # Ubuntu GNOME üzerinde "Allow Launching" (Güvenilir) olarak işaretle
+                    subprocess.run(["gio", "set", desktop_file, "metadata::trusted", "true"], capture_output=True)
+                except Exception:
+                    pass
 
     def fetch_vendor(self, mac_str):
         clean_oui = re.sub(r'[^0-9A-Fa-f]', '', mac_str).upper()[:6]
@@ -110,7 +154,7 @@ class StandaloneMacEnricher:
                 self.oui_dataset[clean_oui] = vendor_clean
                 self.save_cache()
                 return vendor_clean
-        except:
+        except Exception:
             pass
         
         return "Bilinmeyen Üretici"
@@ -119,38 +163,41 @@ class StandaloneMacEnricher:
         if self.active_popup:
             try:
                 self.active_popup.destroy()
-            except:
+            except Exception:
                 pass
 
         self.active_popup = tk.Toplevel(self.root)
         self.active_popup.overrideredirect(True)
         self.active_popup.attributes("-topmost", True)
-        self.active_popup.attributes("-alpha", 0.95)
+        try:
+            self.active_popup.attributes("-alpha", 0.95)
+        except Exception:
+            pass
         self.active_popup.configure(bg="#1e1e1e")
 
         screen_width = self.active_popup.winfo_screenwidth()
-        popup_width = 440
-        popup_height = 70 + (len(items_list) * 25)
-        self.active_popup.geometry(f"{popup_width}x{popup_height}+{screen_width - popup_width - 20}+30")
+        popup_width = 450
+        popup_height = 65 + (len(items_list) * 24)
+        self.active_popup.geometry(f"{popup_width}x{popup_height}+{screen_width - popup_width - 20}+35")
 
         frame = tk.Frame(self.active_popup, bg="#1e1e1e", padx=12, pady=10)
         frame.pack(fill=tk.BOTH, expand=True)
 
-        lbl_title = tk.Label(frame, text=f"🔍 {title}", fg="#4fc3f7", bg="#1e1e1e", font=("Segoe UI", 10, "bold"))
+        lbl_title = tk.Label(frame, text=f"🔍 {title}", fg="#4fc3f7", bg="#1e1e1e", font=("Sans", 10, "bold"))
         lbl_title.pack(anchor=tk.W, pady=(0, 6))
 
         for item in items_list:
             color = "#ff9800" if "[NETWORK DEVICE]" in item else "#a5d6a7"
-            lbl_item = tk.Label(frame, text=item, fg=color, bg="#1e1e1e", font=("Consolas", 9), anchor="w")
+            lbl_item = tk.Label(frame, text=item, fg=color, bg="#1e1e1e", font=("Monospace", 9), anchor="w")
             lbl_item.pack(fill=tk.X, anchor=tk.W)
 
-        self.active_popup.after(5000, self.close_popup)
+        self.active_popup.after(4500, self.close_popup)
 
     def close_popup(self):
         if self.active_popup:
             try:
                 self.active_popup.destroy()
-            except:
+            except Exception:
                 pass
             self.active_popup = None
 
@@ -186,7 +233,7 @@ class StandaloneMacEnricher:
                         )
                 else:
                     self.last_clipboard = current_clip
-        except:
+        except Exception:
             pass
 
         self.root.after(400, self.clipboard_monitor)
