@@ -1,0 +1,45 @@
+name: Build Desktop Binaries
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            artifact_name: MAC-Vendor-Enricher-Windows.exe
+            binary_path: dist/MAC-Vendor-Enricher.exe
+          - os: ubuntu-latest
+            artifact_name: MAC-Vendor-Enricher-Linux
+            binary_path: dist/MAC-Vendor-Enricher
+          - os: macos-latest
+            artifact_name: MAC-Vendor-Enricher-macOS
+            binary_path: dist/MAC-Vendor-Enricher
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Tkinter (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y python3-tk binutils
+
+      - name: Install PyInstaller
+        run: pip install pyinstaller
+
+      - name: Build Standalone Binary
+        run: |
+          pyinstaller --noconsole --onefile --name "MAC-Vendor-Enricher" --add-data "oui_dataset.json${{ runner.os == 'Windows' && ';' || ':' }}." --add-data "network_vendors.json${{ runner.os == 'Windows' && ';' || ':' }}." app.pyw
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.binary_path }}

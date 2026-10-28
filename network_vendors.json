@@ -1,0 +1,32 @@
+{
+  "description": "Üretici adında bu anahtar kelimelerden biri geçerse [NETWORK DEVICE] uyarısı tetiklenir.",
+  "network_keywords": [
+    "Cisco",
+    "Meraki",
+    "Fortinet",
+    "Aruba",
+    "Hewlett Packard Enterprise",
+    "HPE",
+    "ProCurve",
+    "H3C",
+    "Juniper",
+    "Nokia",
+    "Alcatel",
+    "Palo Alto",
+    "Extreme Networks",
+    "Brocade",
+    "Ruckus",
+    "Ubiquiti",
+    "MikroTik",
+    "Check Point",
+    "Sophos",
+    "SonicWall",
+    "WatchGuard",
+    "F5 Networks",
+    "Huawei",
+    "ZTE",
+    "Arista",
+    "Avaya",
+    "Ciena"
+  ]
+}
