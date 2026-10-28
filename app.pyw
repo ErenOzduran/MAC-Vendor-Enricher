@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/init/env python3
 # -*- coding: utf-8 -*-
 
 import sys
@@ -20,14 +20,11 @@ import re
 import json
 import urllib.request
 import urllib.error
-import threading
 
-# Cross-platform ve PyInstaller uyumlu kusursuz dizin tespiti
+# Kesin ve hatasız dizin tespiti
 if getattr(sys, 'frozen', False):
-    # PyInstaller ile derlenmiş exe/binary çalışıyorsa
     BASE_DIR = os.path.dirname(sys.executable)
 else:
-    # Normal Python betiği olarak çalışıyorsa
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 DATASET_FILE = os.path.join(BASE_DIR, "oui_dataset.json")
@@ -40,10 +37,10 @@ MAC_REGEX = re.compile(
 class StandaloneMacEnricher:
     def __init__(self, root):
         self.root = root
-        self.root.withdraw() # Arka planda tam gizli hayalet servis
+        self.root.withdraw()
         
         self.oui_dataset = {}
-        self.network_keywords = ["cisco", "meraki", "fortinet", "aruba", "hewlett packard", "hpe", "juniper", "nokia", "palo alto", "ubiquiti", "mikrotik", "huawei", "tp-link", "tp link"]
+        self.network_keywords = ["cisco", "meraki", "fortinet", "aruba", "hewlett packard", "hpe", "juniper", "nokia", "palo alto", "ubiquiti", "mikrotik", "huawei", "tp-link"]
         
         self.load_files()
         self.create_desktop_shortcut_if_needed()
@@ -53,7 +50,6 @@ class StandaloneMacEnricher:
         self.root.after(400, self.clipboard_monitor)
 
     def load_files(self):
-        # Network anahtar kelimeleri dosyası
         if not os.path.exists(NET_VENDORS_FILE):
             try:
                 with open(NET_VENDORS_FILE, "w", encoding="utf-8") as f:
@@ -68,7 +64,6 @@ class StandaloneMacEnricher:
             except:
                 pass
 
-        # Yerel önbellek veri seti
         if os.path.exists(DATASET_FILE):
             try:
                 with open(DATASET_FILE, "r", encoding="utf-8") as f:
@@ -84,7 +79,6 @@ class StandaloneMacEnricher:
             pass
 
     def create_desktop_shortcut_if_needed(self):
-        """Windows'ta ilk açılışta masaüstüne otomatik kısayol oluşturur"""
         if sys.platform.startswith('win'):
             try:
                 desktop = os.path.join(os.path.expanduser("~"), "Desktop")
