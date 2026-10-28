@@ -2,29 +2,29 @@ name: Build and Release Multi-Platform
 
 on:
   push:
+    branches:
+      - main
     tags:
-      - 'v*' # v1.0.0 gibi etiket atıldığında otomatik tetiklenir
+      - 'v*'
   workflow_dispatch:
+
+permissions:
+  contents: write # GitHub Releases oluşturmak için zorunlu izin
 
 jobs:
   build:
     name: Build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: windows-latest
-            artifact_name: MAC-Vendor-Enricher-Windows.exe
-            build_cmd: pyinstaller --noconsole --onefile --name "MAC-Vendor-Enricher" --add-data "oui_dataset.json;." --add-data "network_vendors.json;." app.pyw
-            bin_path: dist/MAC-Vendor-Enricher.exe
+            asset_name: MAC-Vendor-Enricher-Windows.exe
           - os: ubuntu-latest
-            artifact_name: MAC-Vendor-Enricher-Linux
-            build_cmd: pyinstaller --noconsole --onefile --name "MAC-Vendor-Enricher" --add-data "oui_dataset.json:." --add-data "network_vendors.json:." app.pyw
-            bin_path: dist/MAC-Vendor-Enricher
+            asset_name: MAC-Vendor-Enricher-Linux.tar.gz
           - os: macos-latest
-            artifact_name: MAC-Vendor-Enricher-macOS
-            build_cmd: pyinstaller --noconsole --onefile --name "MAC-Vendor-Enricher" --add-data "oui_dataset.json:." --add-data "network_vendors.json:." app.pyw
-            bin_path: dist/MAC-Vendor-Enricher
+            asset_name: MAC-Vendor-Enricher-macOS.zip
 
     steps:
       - uses: actions/checkout@v4
@@ -33,17 +33,44 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install PyInstaller
-        run: pip install pyinstaller
+      - name: Install Dependencies (Linux Tkinter & PyInstaller)
+        run: |
+          if [ "$RUNNER_OS" == "Linux" ]; then
+            sudo apt-get update
+            sudo apt-get install -y python3-tk
+          fi
+          pip install pyinstaller
+        shell: bash
 
-      - name: Build Binary
-        run: ${{ matrix.build_cmd }}
+      - name: Build Windows Executable
+        if: runner.os == 'Windows'
+        run: |
+          pyinstaller --noconsole --onefile --name "MAC-Vendor-Enricher-Windows" --add-data "oui_dataset.json;." --add-data "network_vendors.json;." app.pyw
 
-      - name: Upload Artifact
+      - name: Build Linux Binary & Launcher
+        if: runner.os == 'Linux'
+        run: |
+          pyinstaller --noconsole --onefile --name "MAC-Vendor-Enricher-Linux" --add-data "oui_dataset.json:." --add-data "network_vendors.json:." app.pyw
+          chmod +x dist/MAC-Vendor-Enricher-Linux
+          # İzinleri (chmod +x) koruyarak tar.gz içine paketle ve doğrudan binary'yi de kopyala
+          tar -czvf dist/MAC-Vendor-Enricher-Linux.tar.gz -C dist MAC-Vendor-Enricher-Linux
+
+      - name: Build macOS App Bundle
+        if: runner.os == 'macOS'
+        run: |
+          pyinstaller --windowed --onefile --name "MAC-Vendor-Enricher" --add-data "oui_dataset.json:." --add-data "network_vendors.json:." app.pyw
+          cd dist
+          zip -r MAC-Vendor-Enricher-macOS.zip MAC-Vendor-Enricher.app
+
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact_name }}
-          path: ${{ matrix.bin_path }}
+          name: ${{ matrix.asset_name }}
+          path: |
+            dist/MAC-Vendor-Enricher-Windows.exe
+            dist/MAC-Vendor-Enricher-Linux
+            dist/MAC-Vendor-Enricher-Linux.tar.gz
+            dist/MAC-Vendor-Enricher-macOS.zip
 
   release:
     needs: build
@@ -53,13 +80,22 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+          merge-multiple: true
 
-      - name: Create Release and Upload Files
-        uses: softprops/action-gh-release@v1
+      - name: Publish to GitHub Releases
+        uses: softprops/action-gh-release@v2
         with:
+          tag_name: v1.0.0
+          name: "MAC Vendor Enricher v1.0.0 (Plug & Play)"
+          body: |
+            ### İndirme ve Kullanım Rehberi (Plug & Play)
+            * **Windows:** `MAC-Vendor-Enricher-Windows.exe` dosyasını indirin ve çift tıklayın. Arka planda çalışmaya başlayacak ve masaüstünüze kısayol oluşturacaktır.
+            * **macOS:** `MAC-Vendor-Enricher-macOS.zip` dosyasını indirin, arşivden çıkarın ve `MAC-Vendor-Enricher.app` uygulamasına çift tıklayın.
+            * **Linux (Ubuntu/Debian):** `MAC-Vendor-Enricher-Linux.tar.gz` arşivini indirin ve klasöre çıkarın (tar.gz çalıştırma izinlerini korur). İlk çalıştırmada masaüstünüze çift tıklanabilir uygulama kısayolunu otomatik oluşturacaktır.
           files: |
-            artifacts/MAC-Vendor-Enricher-Windows.exe/MAC-Vendor-Enricher-Windows.exe
-            artifacts/MAC-Vendor-Enricher-Linux/MAC-Vendor-Enricher-Linux
-            artifacts/MAC-Vendor-Enricher-macOS/MAC-Vendor-Enricher-macOS
+            artifacts/MAC-Vendor-Enricher-Windows.exe
+            artifacts/MAC-Vendor-Enricher-Linux.tar.gz
+            artifacts/MAC-Vendor-Enricher-Linux
+            artifacts/MAC-Vendor-Enricher-macOS.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
