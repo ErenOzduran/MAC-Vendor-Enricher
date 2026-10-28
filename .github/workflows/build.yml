@@ -1,45 +1,65 @@
-name: Build Desktop Binaries
+name: Build and Release Multi-Platform
 
 on:
   push:
-    branches: [ "main" ]
+    tags:
+      - 'v*' # v1.0.0 gibi etiket atıldığında otomatik tetiklenir
   workflow_dispatch:
 
 jobs:
   build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         include:
           - os: windows-latest
             artifact_name: MAC-Vendor-Enricher-Windows.exe
-            binary_path: dist/MAC-Vendor-Enricher.exe
+            build_cmd: pyinstaller --noconsole --onefile --name "MAC-Vendor-Enricher" --add-data "oui_dataset.json;." --add-data "network_vendors.json;." app.pyw
+            bin_path: dist/MAC-Vendor-Enricher.exe
           - os: ubuntu-latest
             artifact_name: MAC-Vendor-Enricher-Linux
-            binary_path: dist/MAC-Vendor-Enricher
+            build_cmd: pyinstaller --noconsole --onefile --name "MAC-Vendor-Enricher" --add-data "oui_dataset.json:." --add-data "network_vendors.json:." app.pyw
+            bin_path: dist/MAC-Vendor-Enricher
           - os: macos-latest
             artifact_name: MAC-Vendor-Enricher-macOS
-            binary_path: dist/MAC-Vendor-Enricher
-
-    runs-on: ${{ matrix.os }}
+            build_cmd: pyinstaller --noconsole --onefile --name "MAC-Vendor-Enricher" --add-data "oui_dataset.json:." --add-data "network_vendors.json:." app.pyw
+            bin_path: dist/MAC-Vendor-Enricher
 
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-
-      - name: Install Tkinter (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y python3-tk binutils
+          python-version: '3.11'
 
       - name: Install PyInstaller
         run: pip install pyinstaller
 
-      - name: Build Standalone Binary
-        run: |
-          pyinstaller --noconsole --onefile --name "MAC-Vendor-Enricher" --add-data "oui_dataset.json${{ runner.os == 'Windows' && ';' || ':' }}." --add-data "network_vendors.json${{ runner.os == 'Windows' && ';' || ':' }}." app.pyw
+      - name: Build Binary
+        run: ${{ matrix.build_cmd }}
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
-          path: ${{ matrix.binary_path }}
+          path: ${{ matrix.bin_path }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Release and Upload Files
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            artifacts/MAC-Vendor-Enricher-Windows.exe/MAC-Vendor-Enricher-Windows.exe
+            artifacts/MAC-Vendor-Enricher-Linux/MAC-Vendor-Enricher-Linux
+            artifacts/MAC-Vendor-Enricher-macOS/MAC-Vendor-Enricher-macOS
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
