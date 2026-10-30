@@ -7,9 +7,13 @@ import subprocess
 import stat
 import re
 import json
+import ssl
 import urllib.request
 import urllib.error
 import tkinter as tk
+
+# macOS ve Windows'ta SSL Sertifika doğrulama hatasını (CERTIFICATE_VERIFY_FAILED) aşmak için context
+SSL_CONTEXT = ssl._create_unverified_context()
 
 # PyInstaller (_MEIPASS) ve Normal Çalışma İçin Dizin Tespiti
 if getattr(sys, 'frozen', False):
@@ -25,9 +29,9 @@ BUNDLED_VENDORS = os.path.join(BUNDLE_DIR, "network_vendors.json")
 # API'den çekilen en doğru verilerin kaydedildiği dinamik önbellek
 USER_CACHE_FILE = os.path.join(os.path.expanduser("~"), ".mac_vendor_cache.json")
 
-# Tarayıcılardaki görünmez karakterlere takılmayan esnek MAC Regex'i
+# macOS'un tek haneli hex (0:3c gibi) ARP çıktılarını da yakalayan gelişmiş MAC Regex'i
 MAC_REGEX = re.compile(
-    r'(?<![0-9A-Fa-f])((?:[0-9A-Fa-f]{2}\s*[:-]\s*){5}[0-9A-Fa-f]{2}|(?:[0-9A-Fa-f]{4}\.){2}[0-9A-Fa-f]{4})(?![0-9A-Fa-f])(?!\s*\()'
+    r'(?<![0-9A-Fa-f:])((?:[0-9A-Fa-f]{1,2}\s*[:-]\s*){5}[0-9A-Fa-f]{1,2}|(?:[0-9A-Fa-f]{4}\.){2}[0-9A-Fa-f]{4})(?![0-9A-Fa-f:])(?!\s*\()'
 )
 
 class StandaloneMacEnricher:
@@ -35,8 +39,8 @@ class StandaloneMacEnricher:
         self.root = root
         self.root.withdraw()
         
-        self.api_cache = {}       # 1. Öncelik: API'den öğrenilen gerçek/güncel veriler
-        self.fallback_dataset = {} # 2. Öncelik: Sadece internet/API yoksa kullanılacak yedek liste
+        self.api_cache = {}
+        self.fallback_dataset = {}
         
         self.network_keywords = [
             "cisco", "meraki", "fortinet", "aruba", "hewlett packard", 
@@ -51,8 +55,19 @@ class StandaloneMacEnricher:
         self.last_clipboard = ""
         self.active_popup = None
         
-        self.show_clean_popup("MAC Vendor Enricher Aktif", ["API öncelikli pano dinleme başladı..."])
+        self.show_clean_popup("MAC Vendor Enricher Aktif", ["Cross-platform pano dinleme başladı..."])
         self.root.after(350, self.clipboard_monitor)
+
+    def normalize_mac_and_oui(self, mac_str):
+        """macOS'un 1c:93:c4:0:3c:ad gibi eksik sıfırlı MAC adreslerini 1C93C4003CAD formatına tamamlar."""
+        mac_str = mac_str.strip()
+        if '.' in mac_str:
+            clean_hex = re.sub(r'[^0-9A-Fa-f]', '', mac_str).upper()
+        else:
+            sep = ':' if ':' in mac_str else '-'
+            parts = [p.strip().zfill(2) for p in mac_str.split(sep)]
+            clean_hex = "".join(parts).upper()
+        return clean_hex, clean_hex[:6]
 
     def normalize_oui_dict(self, raw_dict):
         cleaned = {}
@@ -64,7 +79,6 @@ class StandaloneMacEnricher:
         return cleaned
 
     def load_files(self):
-        # 1. Network anahtar kelimelerini yükle ve varsayılanlarla birleştir
         if os.path.exists(BUNDLED_VENDORS):
             try:
                 with open(BUNDLED_VENDORS, "r", encoding="utf-8") as f:
@@ -74,7 +88,6 @@ class StandaloneMacEnricher:
             except Exception:
                 pass
 
-        # 2. Gömülü veri setini SADECE yedek (fallback) olarak yükle
         if os.path.exists(BUNDLED_DATASET):
             try:
                 with open(BUNDLED_DATASET, "r", encoding="utf-8") as f:
@@ -82,7 +95,6 @@ class StandaloneMacEnricher:
             except Exception:
                 pass
 
-        # 3. API'den daha önce çekilmiş doğru önbelleği yükle
         if os.path.exists(USER_CACHE_FILE):
             try:
                 with open(USER_CACHE_FILE, "r", encoding="utf-8") as f:
@@ -153,17 +165,23 @@ class StandaloneMacEnricher:
         return re.sub(r'\s+', ' ', v).strip(" .,-")
 
     def fetch_vendor(self, mac_str):
-        clean_oui = re.sub(r'[^0-9A-Fa-f]', '', mac_str).upper()[:6]
-        
-        # 1. ADIM: Daha önce API'den doğrulayıp kaydettiğimiz önbellekte varsa oradan dön
+        full_hex, clean_oui = self.normalize_mac_and_oui(mac_str)
+
+        # 1. Özel Protokol Adresleri Kontrolü (Broadcast & Multicast)
+        if full_hex == "FFFFFFFFFFFF":
+            return "Broadcast Adresi"
+        if clean_oui.startswith("01005E") or clean_oui.startswith("3333"):
+            return "Multicast Adresi"
+
+        # 2. Önbellekte Varsa Getir
         if clean_oui in self.api_cache:
             return self.api_cache[clean_oui]
 
-        # 2. ADIM: Doğrudan Canlı API'den (maclookup.app) en güncel üreticiyi çek
+        # 3. Canlı API 1: maclookup.app (macOS SSL Context destekli)
         try:
             url = f"https://api.maclookup.app/v2/macs/{clean_oui}"
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=2.5) as resp:
+            with urllib.request.urlopen(req, timeout=2.5, context=SSL_CONTEXT) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 company = data.get("company", "").strip()
                 if company:
@@ -174,11 +192,11 @@ class StandaloneMacEnricher:
         except Exception:
             pass
 
-        # 3. ADIM: İkinci Canlı API (macvendors.com)
+        # 4. Canlı API 2: macvendors.com (macOS SSL Context destekli)
         try:
             url2 = f"https://api.macvendors.com/{clean_oui}"
             req2 = urllib.request.Request(url2, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req2, timeout=2.5) as resp2:
+            with urllib.request.urlopen(req2, timeout=2.5, context=SSL_CONTEXT) as resp2:
                 vendor = resp2.read().decode("utf-8").strip()
                 if vendor and "errors" not in vendor.lower():
                     vendor_clean = self.clean_vendor_name(vendor)
@@ -188,19 +206,22 @@ class StandaloneMacEnricher:
         except Exception:
             pass
 
-        # 4. ADIM: İnternet yoksa veya API'ler yanıt vermediyse gömülü veri setine bak
+        # 5. Yedek (Fallback) Veri Seti
         if clean_oui in self.fallback_dataset:
             return self.fallback_dataset[clean_oui]
+
+        # 6. Rastgele / Gizli MAC (Locally Administered Address - LAA) Kontrolü
+        # İkinci hex karakteri 2, 6, A veya E ise telefon/PC tarafından rastgele üretilmiştir
+        if len(clean_oui) == 6 and clean_oui[1] in ('2', '6', 'A', 'E'):
+            return "Gizli/Rastgele MAC (LAA)"
         
         return "Bilinmeyen Üretici"
 
     def get_clipboard_text(self):
-        """Hem standart panoyu (Ctrl+C / Sağ Tık Kopyala) hem de tarayıcı UTF8 formatını okur."""
         for clip_type in ("CLIPBOARD", "PRIMARY"):
             try:
                 text = self.root.selection_get(selection=clip_type)
                 if text and text.strip():
-                    # Tarayıcılardan gelen görünmez HTML boşluklarını temizle
                     clean_text = text.replace('\u200b', '').replace('\xa0', ' ')
                     if clip_type == "CLIPBOARD":
                         return clean_text
@@ -228,7 +249,7 @@ class StandaloneMacEnricher:
         self.active_popup.configure(bg="#1e1e1e")
 
         screen_width = self.active_popup.winfo_screenwidth()
-        popup_width = 460
+        popup_width = 480
         popup_height = 65 + (len(items_list) * 24)
         self.active_popup.geometry(f"{popup_width}x{popup_height}+{screen_width - popup_width - 20}+35")
 
@@ -282,7 +303,7 @@ class StandaloneMacEnricher:
                     if detected_summary:
                         self.show_clean_popup(
                             f"MAC Tespit Edildi ({len(detected_summary)} Cihaz)",
-                            detected_summary
+                            detected_summary[:12] # Çok uzun ARP tablolarında ekranı taşırmamak için ilk 12 cihazı göster
                         )
                 else:
                     self.last_clipboard = current_clip
