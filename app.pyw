@@ -54,8 +54,10 @@ class StandaloneMacEnricher:
         
         self.last_clipboard = ""
         self.active_popup = None
+        self.popup_timer = None
         
-        self.show_clean_popup("MAC Vendor Enricher Aktif", ["Cross-platform pano dinleme başladı..."])
+        # İlk açılış bildirimi (6 saniye kalır)
+        self.show_clean_popup("MAC Vendor Enricher Aktif", ["Cross-platform pano dinleme başladı..."], duration=6000)
         self.root.after(350, self.clipboard_monitor)
 
     def normalize_mac_and_oui(self, mac_str):
@@ -211,7 +213,6 @@ class StandaloneMacEnricher:
             return self.fallback_dataset[clean_oui]
 
         # 6. Rastgele / Gizli MAC (Locally Administered Address - LAA) Kontrolü
-        # İkinci hex karakteri 2, 6, A veya E ise telefon/PC tarafından rastgele üretilmiştir
         if len(clean_oui) == 6 and clean_oui[1] in ('2', '6', 'A', 'E'):
             return "Gizli/Rastgele MAC (LAA)"
         
@@ -232,7 +233,14 @@ class StandaloneMacEnricher:
         except Exception:
             return ""
 
-    def show_clean_popup(self, title, items_list):
+    def show_clean_popup(self, title, items_list, duration=12000):
+        if self.popup_timer:
+            try:
+                self.root.after_cancel(self.popup_timer)
+            except Exception:
+                pass
+            self.popup_timer = None
+
         if self.active_popup:
             try:
                 self.active_popup.destroy()
@@ -249,24 +257,46 @@ class StandaloneMacEnricher:
         self.active_popup.configure(bg="#1e1e1e")
 
         screen_width = self.active_popup.winfo_screenwidth()
-        popup_width = 480
-        popup_height = 65 + (len(items_list) * 24)
+        popup_width = 500
+        popup_height = 70 + (len(items_list) * 24)
         self.active_popup.geometry(f"{popup_width}x{popup_height}+{screen_width - popup_width - 20}+35")
 
         frame = tk.Frame(self.active_popup, bg="#1e1e1e", padx=12, pady=10)
         frame.pack(fill=tk.BOTH, expand=True)
 
-        lbl_title = tk.Label(frame, text=f"🔍 {title}", fg="#4fc3f7", bg="#1e1e1e", font=("Sans", 10, "bold"))
+        lbl_title = tk.Label(
+            frame, 
+            text=f"🔍 {title}  [✕ Kapat]", 
+            fg="#4fc3f7", 
+            bg="#1e1e1e", 
+            font=("Sans", 10, "bold"),
+            cursor="hand2"
+        )
         lbl_title.pack(anchor=tk.W, pady=(0, 6))
+
+        # Pencerenin herhangi bir yerine tıklandığında anında kapat
+        self.active_popup.bind("<Button-1>", lambda e: self.close_popup())
+        frame.bind("<Button-1>", lambda e: self.close_popup())
+        lbl_title.bind("<Button-1>", lambda e: self.close_popup())
 
         for item in items_list:
             color = "#ff9800" if "[NETWORK DEVICE]" in item else "#a5d6a7"
             lbl_item = tk.Label(frame, text=item, fg=color, bg="#1e1e1e", font=("Monospace", 9), anchor="w")
             lbl_item.pack(fill=tk.X, anchor=tk.W)
+            lbl_item.bind("<Button-1>", lambda e: self.close_popup())
 
-        self.active_popup.after(4500, self.close_popup)
+        # Cihaz sayısına göre dinamik süre: En az 12 saniye, çoklu listede 25 saniyeye kadar ekranda kalır
+        dynamic_duration = min(25000, max(duration, len(items_list) * 2500))
+        self.popup_timer = self.root.after(dynamic_duration, self.close_popup)
 
     def close_popup(self):
+        if self.popup_timer:
+            try:
+                self.root.after_cancel(self.popup_timer)
+            except Exception:
+                pass
+            self.popup_timer = None
+
         if self.active_popup:
             try:
                 self.active_popup.destroy()
@@ -303,7 +333,8 @@ class StandaloneMacEnricher:
                     if detected_summary:
                         self.show_clean_popup(
                             f"MAC Tespit Edildi ({len(detected_summary)} Cihaz)",
-                            detected_summary[:12] # Çok uzun ARP tablolarında ekranı taşırmamak için ilk 12 cihazı göster
+                            detected_summary[:14], # Uzun ARP tablolarında ilk 14 cihazı göster
+                            duration=12000
                         )
                 else:
                     self.last_clipboard = current_clip
